@@ -229,14 +229,18 @@ class Worker
 
         $this->unacks = new \SplObjectStorage();
 
-        foreach ($unacks as $batchHandler) {
+        while ($unacks->valid()) {
+            $batchHandler = $unacks->current();
             [$envelope, $transportName] = $unacks[$batchHandler];
+
             try {
                 $this->bus->dispatch($envelope->with(new FlushBatchHandlersStamp($force)));
                 $envelope = $envelope->withoutAll(NoAutoAckStamp::class);
-                unset($unacks[$batchHandler], $batchHandler);
             } catch (\Throwable $e) {
                 $this->acks[] = [$transportName, $envelope, $e];
+            } finally {
+                $unacks->next();
+                unset($unacks[$batchHandler], $batchHandler);
             }
         }
 
