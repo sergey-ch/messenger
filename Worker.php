@@ -12,6 +12,8 @@
 namespace Symfony\Component\Messenger;
 
 use Psr\Log\LoggerInterface;
+use React\EventLoop\Loop;
+use React\Promise\Promise;
 use Symfony\Component\EventDispatcher\Event;
 use Symfony\Component\EventDispatcher\LegacyEventDispatcherProxy;
 use Symfony\Component\Messenger\Event\WorkerMessageFailedEvent;
@@ -31,6 +33,9 @@ use Symfony\Component\Messenger\Stamp\ReceivedStamp;
 use Symfony\Component\Messenger\Transport\Receiver\QueueReceiverInterface;
 use Symfony\Component\Messenger\Transport\Receiver\ReceiverInterface;
 use Symfony\Contracts\EventDispatcher\EventDispatcherInterface;
+use function React\Async\await;
+use function React\Async\coroutine;
+use function React\Promise\all;
 
 /**
  * @author Samuel Roze <samuel.roze@gmail.com>
@@ -229,20 +234,34 @@ class Worker
 
         $this->unacks = new \SplObjectStorage();
 
-        while ($unacks->valid()) {
-            $batchHandler = $unacks->current();
-            [$envelope, $transportName] = $unacks[$batchHandler];
+        await(coroutine(function () use ($unacks, $force) {
+            $promises = [];
 
-            try {
-                $this->bus->dispatch($envelope->with(new FlushBatchHandlersStamp($force)));
-                $envelope = $envelope->withoutAll(NoAutoAckStamp::class);
-            } catch (\Throwable $e) {
-                $this->acks[] = [$transportName, $envelope, $e];
-            } finally {
+            while ($unacks->valid()) {
+                $batchHandler = $unacks->current();
+                [$envelope, $transportName] = $unacks[$batchHandler];
+
+                $promises[] = new Promise(function ($resolve) use ($envelope, $transportName, $force) {
+                    Loop::addTimer(0, function ($timer) use ($envelope, $transportName, $force, $resolve) {
+                        Loop::cancelTimer($timer);
+
+                        try {
+                            $this->bus->dispatch($envelope->with(new FlushBatchHandlersStamp($force)));
+                            $envelope = $envelope->withoutAll(NoAutoAckStamp::class);
+                        } catch (\Throwable $e) {
+                            $this->acks[] = [$transportName, $envelope, $e];
+                        } finally {
+                            $resolve();
+                        }
+                    });
+                });
+
                 $unacks->next();
                 unset($unacks[$batchHandler], $batchHandler);
             }
-        }
+
+            yield all($promises);
+        }));
 
         return $this->ack();
     }
